@@ -454,6 +454,20 @@ function GroupTournamentApp() {
     showToast("Groups shuffled");
   };
 
+  // ---- clear the built groups/schedule/scores WITHOUT reshuffling into a new
+  // set — e.g. wiping out a test/dummy run before sharing the live link,
+  // without touching the roster that's already been entered. ----
+  const clearGroups = () => {
+    if (groups.length === 0) { showToast("Nothing to clear — no groups yet"); return; }
+    const ok = window.confirm("This clears the current groups, schedule, and every recorded score — the roster stays intact. There's no undo. Export a PDF first (Standings tab) if you want to keep a record. Clear groups & schedule?");
+    if (!ok) return;
+    setGroups([]);
+    setMatchScores({}); setCourtOverrides({});
+    patch({ groups: [], matchScores: {}, courtOverrides: {} });
+    setTab("roster");
+    showToast("Groups & schedule cleared");
+  };
+
   // ---- move-a-player editing (admin dropdowns on the Groups tab) ----
   const setTeamSlot = (groupId, teamId, slot, playerId) => {
     const next = groups.map((g) => g.id !== groupId ? g : {
@@ -928,14 +942,14 @@ function GroupTournamentApp() {
             addPlayer={addPlayer} updatePlayer={updatePlayer} removePlayer={removePlayer}
             editingRoster={editingRoster} patch={patch}
             bulkOpen={bulkOpen} setBulkOpen={setBulkOpen} bulkText={bulkText} setBulkText={setBulkText} applyBulkRoster={applyBulkRoster}
-            shuffleGroups={shuffleGroups} hasGroups={groups.length > 0} audit={assignmentAudit}
+            shuffleGroups={shuffleGroups} clearGroups={clearGroups} hasGroups={groups.length > 0} audit={assignmentAudit}
           />
         )}
 
         {tab === "groups" && (
           <GroupsTab
             groups={groups} roster={roster} byId={byId} isAdmin={isAdmin} audit={assignmentAudit}
-            shuffleGroups={shuffleGroups} setTeamSlot={setTeamSlot} setCaptain={setCaptain}
+            shuffleGroups={shuffleGroups} clearGroups={clearGroups} setTeamSlot={setTeamSlot} setCaptain={setCaptain}
             expandedGroupIds={expandedGroupIds} toggleGroupExpanded={toggleGroupExpanded}
             setTab={setTab}
           />
@@ -967,7 +981,7 @@ function GroupTournamentApp() {
 
 // ============================ Roster tab ============================
 
-function RosterTab({ roster, isAdmin, rosterCounts, addPlayer, updatePlayer, removePlayer, editingRoster, patch, bulkOpen, setBulkOpen, bulkText, setBulkText, applyBulkRoster, shuffleGroups, hasGroups, audit }) {
+function RosterTab({ roster, isAdmin, rosterCounts, addPlayer, updatePlayer, removePlayer, editingRoster, patch, bulkOpen, setBulkOpen, bulkText, setBulkText, applyBulkRoster, shuffleGroups, clearGroups, hasGroups, audit }) {
   const [newName, setNewName] = useState("");
   const [newRank, setNewRank] = useState("Intermediate");
 
@@ -1034,6 +1048,11 @@ function RosterTab({ roster, isAdmin, rosterCounts, addPlayer, updatePlayer, rem
           {hasGroups ? "Reshuffle groups →" : "Shuffle into groups →"}
         </button>
       )}
+      {isAdmin && hasGroups && (
+        <button style={styles.dangerBtnLg} onClick={clearGroups}>
+          Clear groups &amp; schedule
+        </button>
+      )}
       {!isAdmin && <p style={styles.muted}>Sign in as admin to edit the roster or shuffle groups.</p>}
     </section>
   );
@@ -1041,7 +1060,7 @@ function RosterTab({ roster, isAdmin, rosterCounts, addPlayer, updatePlayer, rem
 
 // ============================ Groups tab ============================
 
-function GroupsTab({ groups, roster, byId, isAdmin, audit, shuffleGroups, setTeamSlot, setCaptain, expandedGroupIds, toggleGroupExpanded, setTab }) {
+function GroupsTab({ groups, roster, byId, isAdmin, audit, shuffleGroups, clearGroups, setTeamSlot, setCaptain, expandedGroupIds, toggleGroupExpanded, setTab }) {
   const experts = roster.filter((p) => p.rank === "Expert");
   const intermediates = roster.filter((p) => p.rank === "Intermediate");
   const novices = roster.filter((p) => p.rank === "Novice");
@@ -1051,7 +1070,12 @@ function GroupsTab({ groups, roster, byId, isAdmin, audit, shuffleGroups, setTea
     <section>
       <div style={styles.sectionHead}>
         <h2 style={styles.h2}>Groups &amp; teams</h2>
-        {isAdmin && groups.length > 0 && <button style={styles.linkBtn} onClick={shuffleGroups}>Reshuffle</button>}
+        {isAdmin && groups.length > 0 && (
+          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+            <button style={styles.linkBtn} onClick={shuffleGroups}>Reshuffle</button>
+            <button style={{ ...styles.linkBtn, color: "#B4483A" }} onClick={clearGroups}>Clear</button>
+          </div>
+        )}
       </div>
       {groups.length === 0 ? (
         <p style={styles.muted}>No groups yet — go to Roster and shuffle first.</p>
@@ -1390,13 +1414,14 @@ const styles = {
   warnLine: { fontSize: 12.5, color: "#B4483A", marginTop: 4, marginBottom: 12 },
   textarea: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 8, padding: 10, fontSize: 14, resize: "vertical", marginBottom: 10 },
   input: { border: "none", outline: "none", fontSize: 14, flex: 1, minWidth: 0, background: "transparent" },
-  inputDisabled: { background: "#F1F0E6", color: "#A8A99C" },
+  inputDisabled: { background: "#F1F0E6", color: "#16211F", WebkitTextFillColor: "#16211F", opacity: 1 },
   rankSelect: { fontSize: 12.5, border: "1px solid #E4E0D2", borderRadius: 6, padding: "5px 6px", color: "#3a423f", background: "#fff" },
   rosterList: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 },
   rosterRow: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E4E0D2", borderRadius: 8, padding: "8px 10px" },
   removeBtn: { background: "none", border: "none", color: "#B4483A", fontSize: 14, fontWeight: 700, padding: "0 4px" },
   primaryBtnLg: { width: "100%", background: "#0F5257", color: "#fff", border: "none", borderRadius: 10, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Oswald', sans-serif", textTransform: "uppercase", letterSpacing: 0.5 },
   primaryBtn: { background: "#0F5257", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700 },
+  dangerBtnLg: { width: "100%", background: "#fff", color: "#B4483A", border: "1.5px solid #B4483A", borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700, fontFamily: "'Oswald', sans-serif", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 10 },
   groupCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, marginBottom: 10, overflow: "hidden" },
   groupHead: { width: "100%", display: "flex", alignItems: "center", gap: 8, background: "transparent", border: "none", padding: "12px 14px", font: "inherit", color: "inherit", cursor: "pointer", flexWrap: "wrap" },
   groupTitle: { fontFamily: "'Oswald', sans-serif", fontSize: 15, fontWeight: 700, textTransform: "uppercase" },
