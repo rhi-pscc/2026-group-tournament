@@ -13,6 +13,13 @@
   input, textarea, select { font-family: 'Inter', sans-serif; }
   ::-webkit-scrollbar { height: 6px; width: 6px; }
   ::-webkit-scrollbar-thumb { background: #C4D93B; border-radius: 4px; }
+  @media (max-width: 480px) {
+    .hdr-row { flex-direction: column !important; align-items: stretch !important; }
+    .hdr-title { min-width: 0 !important; width: 100% !important; }
+    .hdr-badges { flex-direction: row !important; align-items: center !important; justify-content: space-between !important; margin-left: 0 !important; margin-top: 10px !important; width: 100% !important; }
+    .hdr-h1 { font-size: 19px !important; white-space: normal !important; word-break: break-word !important; }
+    .hdr-input { font-size: 16px !important; width: 100% !important; }
+  }
 </style>
 
 <!-- React (no build step needed) -->
@@ -728,7 +735,7 @@ function GroupTournamentApp() {
     if (withGames.length === 0) {
       subLine("No results recorded yet.");
     } else {
-      const sorted = [...withGames].sort((a, b) => b.winPct - a.winPct || b.wins - a.wins || b.played - a.played);
+      const sorted = [...withGames].sort((a, b) => b.wins - a.wins || b.diff - a.diff);
       const eligible = withGames.filter((p) => p.played >= 2);
       const pool = eligible.length > 0 ? eligible : withGames;
       const bestRecord = [...pool].sort((a, b) => b.winPct - a.winPct || b.wins - a.wins)[0];
@@ -849,16 +856,16 @@ function GroupTournamentApp() {
             <img src={LOGO_SRC} alt="Robert Half · ATI" style={styles.logoImg} />
           </div>
         </div>
-        <div style={styles.headerRow}>
-          <div style={{ minWidth: 190, flex: 1 }}>
+        <div style={styles.headerRow} className="hdr-row">
+          <div style={{ minWidth: 190, flex: 1 }} className="hdr-title">
             <div style={styles.eyebrow}>{syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}</div>
             {isAdmin ? (
-              <input value={eventName} onChange={(e) => setEventName(e.target.value)} onBlur={() => patch({ eventName })} style={styles.eventNameInput} />
+              <input value={eventName} onChange={(e) => setEventName(e.target.value)} onBlur={() => patch({ eventName })} style={styles.eventNameInput} className="hdr-input" />
             ) : (
-              <h1 style={styles.h1}>{eventName}</h1>
+              <h1 style={styles.h1} className="hdr-h1">{eventName}</h1>
             )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0, marginLeft: "auto" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0, marginLeft: "auto" }} className="hdr-badges">
             <div style={styles.courtBadge}>{courtCount} COURTS · {groups.length} GROUPS</div>
             {isAdmin ? (
               <button style={styles.adminPillOn} onClick={lockAdmin}>Admin ✓ (tap to lock)</button>
@@ -1275,7 +1282,7 @@ function FunStatsBody({ withGames, matchHighlights, byId }) {
   const ironPlayer = [...withGames].sort((a, b) => b.played - a.played)[0];
   const woodenSpoon = [...withGames].sort((a, b) => b.losses - a.losses)[0];
   const undefeated = withGames.filter((p) => p.wins > 0 && p.losses === 0 && p.ties === 0);
-  const sorted = [...withGames].sort((a, b) => b.winPct - a.winPct || b.wins - a.wins || b.played - a.played);
+  const sorted = [...withGames].sort((a, b) => b.wins - a.wins || b.diff - a.diff);
 
   return (
     <>
