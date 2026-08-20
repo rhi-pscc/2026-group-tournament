@@ -850,7 +850,7 @@ function GroupTournamentApp() {
           </div>
         </div>
         <div style={styles.headerRow}>
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ minWidth: 190, flex: 1 }}>
             <div style={styles.eyebrow}>{syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}</div>
             {isAdmin ? (
               <input value={eventName} onChange={(e) => setEventName(e.target.value)} onBlur={() => patch({ eventName })} style={styles.eventNameInput} />
@@ -858,7 +858,7 @@ function GroupTournamentApp() {
               <h1 style={styles.h1}>{eventName}</h1>
             )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0, marginLeft: "auto" }}>
             <div style={styles.courtBadge}>{courtCount} COURTS · {groups.length} GROUPS</div>
             {isAdmin ? (
               <button style={styles.adminPillOn} onClick={lockAdmin}>Admin ✓ (tap to lock)</button>
@@ -1343,7 +1343,7 @@ const styles = {
   app: { fontFamily: "'Inter', sans-serif", background: "#F7F5EE", minHeight: "100vh", color: "#16211F", paddingBottom: 40 },
   header: { position: "relative", padding: "20px 20px 16px", overflow: "hidden" },
   headerLine: { position: "absolute", top: 0, left: 0, right: 0, height: 6, background: "linear-gradient(90deg,#0F5257,#C4D93B)" },
-  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 10, gap: 10 },
+  headerRow: { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-end", marginTop: 10, gap: 10 },
   eyebrow: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: 1.5, color: "#0F5257", fontWeight: 700 },
   h1: { fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 700, margin: "4px 0 0", letterSpacing: 0.3, textTransform: "uppercase" },
   eventNameInput: { fontFamily: "'Oswald', sans-serif", fontSize: 20, fontWeight: 700, margin: "4px 0 0", letterSpacing: 0.3, textTransform: "uppercase", border: "1px solid #E4E0D2", borderRadius: 6, padding: "4px 8px", width: "100%", background: "#fff" },
