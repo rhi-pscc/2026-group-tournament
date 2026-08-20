@@ -151,6 +151,13 @@ function teamLabelFromIds(t, byId) {
   return `${playerName(t.p1Id, byId)} & ${playerName(t.p2Id, byId)}`;
 }
 
+// "Group 1 — Ashwin" style label so people can tell groups apart by captain,
+// not just a number. Computed from live captainId (not baked into g.label at
+// shuffle time) so it stays correct if admin reassigns the captain later.
+function groupLabelWithCaptain(g, byId) {
+  return `${g.label} — ${playerName(g.captainId, byId)}`;
+}
+
 // Builds every cross-group match (round-robin per category key across groups that
 // have it) plus Expert Singles round-robin among captains. Ties are allowed here
 // (unlike a single-elimination bracket) — a tied score just means "Tie · replay",
@@ -850,7 +857,7 @@ function ScheduleTab({ groups, matches, roundsWithCourts, byId, isAdmin, courtCo
                       <div style={{ ...styles.sideBtn, ...(isWinner ? styles.sideBtnWin : {}) }}>
                         {isWinner && <span style={styles.trophyMark}>🏆 </span>}
                         <div>{team.category === "Singles" ? playerName(team.p1Id, byId) : teamLabelFromIds(team, byId)}</div>
-                        <div style={styles.groupSubLabel}>{group.label}</div>
+                        <div style={styles.groupSubLabel}>{groupLabelWithCaptain(group, byId)}</div>
                       </div>
                       {isAdmin ? (
                         <input
@@ -893,7 +900,7 @@ function StandingsTab({ standings, matches, matchResult, byId, champion }) {
               <div key={row.group.id} style={styles.standCard}>
                 <div style={styles.standRowStatic}>
                   <span style={styles.rankNum}>{i + 1}</span>
-                  <span style={styles.standName}>{row.group.label}</span>
+                  <span style={styles.standName}>{groupLabelWithCaptain(row.group, byId)}</span>
                   <span style={styles.recordText}>{row.points} pt{row.points === 1 ? "" : "s"}</span>
                   <span style={styles.diffText}>{row.played}/{row.total} played</span>
                 </div>
@@ -901,10 +908,10 @@ function StandingsTab({ standings, matches, matchResult, byId, champion }) {
             ))}
           </div>
           {champion && !champion.tie && matches.length > 0 && (
-            <div style={styles.championCard}>🏆 Champions: {champion.label}</div>
+            <div style={styles.championCard}>🏆 Champions: {groupLabelWithCaptain(champion, byId)}</div>
           )}
           {champion && champion.tie && (
-            <div style={styles.championCard}>🏆 Tied for first: {champion.tie.map((g) => g.label).join(" & ")}</div>
+            <div style={styles.championCard}>🏆 Tied for first: {champion.tie.map((g) => groupLabelWithCaptain(g, byId)).join(" & ")}</div>
           )}
         </>
       )}
