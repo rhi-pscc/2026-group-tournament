@@ -79,12 +79,20 @@ block.
    closest match — good bar-talk material once the tournament wraps.
 7. **Export PDF** (top of the Standings and Fun Stats tabs): downloads a
    point-in-time record — final standings, every Group's roster, the full match
-   log round by round, and the Fun Stats leaderboard — as a PDF. Worth doing
-   once the tournament is done and before you reshuffle for the next one, since
+   log round by round, and the Fun Stats leaderboard — as a PDF, laid out with
+   the site's own colors (teal/lime section chips, a colored champion banner,
+   ranked medal-style dots) rather than a plain text dump. Worth doing once the
+   tournament is done and before you reshuffle for the next one, since
    reshuffling resets the schedule and every recorded score with no way to get
    them back. (Reshuffle now double-checks with you first if it would erase any
    scores you've already entered, but the PDF is the actual permanent copy.)
-8. Everyone else just opens the link — read-only, live-updating, no sign-in needed.
+8. **Sponsor logo** (top right of the header, and on the PDF's cover band): the
+   Robert Half · ATI lockup, background-removed from the event banner and set
+   on a teal chip to match the rest of the header. It's embedded directly in
+   `index.html` as a data URI, so there's no separate image file or hosting to
+   manage — swap it by replacing the `LOGO_SRC` constant near the top of the
+   `<script type="text/babel">` block if it ever needs to change.
+9. Everyone else just opens the link — read-only, live-updating, no sign-in needed.
    The **"Find your match"** bar works the same way as the other event pages.
 
 ## Verification note
