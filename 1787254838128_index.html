@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>RHI-PSCC Group Tournament — Draw &amp; Standings</title>
+<link rel="icon" href="data:,">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #F7F5EE; }
+  button { font-family: 'Inter', sans-serif; cursor: pointer; }
+  input, textarea, select { font-family: 'Inter', sans-serif; }
+  ::-webkit-scrollbar { height: 6px; width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #C4D93B; border-radius: 4px; }
+</style>
+
+<!-- React (no build step needed) -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.8/babel.min.js"></script>
+
+<!-- Firebase (compat SDK — no bundler required) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // =====================================================================
+  // FIREBASE SETUP — reuses the same rhi-badminton Firebase project & admin
+  // login as the existing doubles-bracket app (see SETUP_GUIDE.md — "Quick
+  // path: reusing this for a new event"). Only TOURNAMENT_ID changes, so
+  // this event's data never collides with any other event's document.
+  // If this should instead be a brand-new Firebase project, replace the
+  // block below with that project's own config.
+  // =====================================================================
+  window.FIREBASE_CONFIG = {
+    apiKey: "AIzaSyDCxFi_u-c861eFKWyaksyxbDoKXyT8_5U",
+    authDomain: "rhi-badminton.firebaseapp.com",
+    projectId: "rhi-badminton",
+    storageBucket: "rhi-badminton.firebasestorage.app",
+    messagingSenderId: "840657399634",
+    appId: "1:840657399634:web:1685538c28a3823a8a148b"
+  };
+  window.TOURNAMENT_ID = "rhi-aug21-groups";
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ---------- Design tokens (matches the existing RHI-PSCC event pages) ----------
+Court teal:  #0F5257 / #16777D
+Chalk bg:    #F7F5EE
+Shuttle lime:#C4D93B
+Charcoal:    #16211F
+Muted:       #6C7A76
+Court line:  #E4E0D2
+------------------------------------------------------------------------------- */
+
+const ADMIN_EMAIL = "admin@rhi-pscc-tournament.app"; // same admin login as other events in this Firebase project
+const RANKS = ["Expert", "Intermediate", "Novice"];
+const DEFAULT_COURT_COUNT = 3;
+const DEFAULT_MINUTES = 15;
+const LETTERS = "ABCDEFGHIJ";
+
+// ============================ group-tournament engine ============================
+// Model: every Expert in the roster captains one Group. Every other player
+// (Intermediate/Novice) is dealt into a group. Per group: Intermediate players pair
+// into lettered teams (A, B, C…); Novice players — one partners the group's Expert
+// as a Mixed team, the rest pair into Novice team(s). Every match is cross-group
+// only: round-robin per category-key across every group that has that category.
+// (Verified with a standalone randomized test harness: 500 fuzzed roster shapes,
+// expert counts 1–6, court counts 1–8 — zero scheduling conflicts, and the exact
+// Aug 21 roster reproduces the hand-built workbook's 15 matches / 6-round-minimum
+// result exactly.)
+
+function shuffleArr(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function dealRoundRobin(items, n) {
+  const buckets = Array.from({ length: n }, () => []);
+  items.forEach((item, i) => buckets[i % n].push(item));
+  return buckets;
+}
+
+// roster: [{id, name, rank}]. Returns freshly-shuffled `groups` state:
+// [{ id, label, captainId, teams: [{ id, key, category, letter, label, groupId, p1Id, p2Id }] }]
+function autoAssignGroups(roster) {
+  const experts = roster.filter((p) => p.rank === "Expert");
+  const intermediates = roster.filter((p) => p.rank === "Intermediate");
+  const novices = roster.filter((p) => p.rank === "Novice");
+  const n = experts.length;
+  if (n === 0) return [];
+
+  const orderedExperts = shuffleArr(experts);
+  const intPools = dealRoundRobin(shuffleArr(intermediates), n);
+  const novPools = dealRoundRobin(shuffleArr(novices), n);
+
+  return orderedExperts.map((captain, i) => {
+    const groupId = `g${i + 1}`;
+    const teams = [];
+    const ints = intPools[i];
+    for (let k = 0, li = 0; k < ints.length; k += 2, li++) {
+      teams.push({
+        id: `${groupId}_int_${li}`, key: `Intermediate-${LETTERS[li]}`, category: "Intermediate",
+        letter: LETTERS[li], label: `Intermediate Team ${LETTERS[li]}`, groupId,
+        p1Id: ints[k].id, p2Id: ints[k + 1] ? ints[k + 1].id : null,
+      });
+    }
+    const novs = novPools[i];
+    const mixedPartner = novs[0] || null;
+    teams.push({
+      id: `${groupId}_mixed`, key: "Mixed", category: "Mixed", label: "Mixed (Expert+Novice) Team", groupId,
+      p1Id: captain.id, p2Id: mixedPartner ? mixedPartner.id : null,
+    });
+    const remainingNovs = novs.slice(1);
+    const multiNovice = remainingNovs.length > 2;
+    for (let k = 0, ln = 0; k < remainingNovs.length; k += 2, ln++) {
+      teams.push({
+        id: `${groupId}_nov_${ln}`, key: multiNovice ? `Novice-${LETTERS[ln]}` : "Novice", category: "Novice",
+        label: multiNovice ? `Novice Team ${LETTERS[ln]}` : "Novice Team", groupId,
+        p1Id: remainingNovs[k].id, p2Id: remainingNovs[k + 1] ? remainingNovs[k + 1].id : null,
+      });
+    }
+    return { id: groupId, label: `Group ${i + 1}`, captainId: captain.id, teams };
+  });
+}
+
+function rosterMap(roster) {
+  const m = {};
+  roster.forEach((p) => { m[p.id] = p; });
+  return m;
+}
+
+function playerName(pid, byId) {
+  if (!pid) return "BYE PARTNER";
+  const p = byId[pid];
+  return p ? p.name : "(removed player)";
+}
+
+function teamLabelFromIds(t, byId) {
+  return `${playerName(t.p1Id, byId)} & ${playerName(t.p2Id, byId)}`;
+}
+
+// Builds every cross-group match (round-robin per category key across groups that
+// have it) plus Expert Singles round-robin among captains. Ties are allowed here
+// (unlike a single-elimination bracket) — a tied score just means "Tie · replay",
+// worth 0 points to either group, matching the source workbook's rule exactly.
+function buildMatches(groups, byId) {
+  const byKey = {};
+  groups.forEach((g) => {
+    g.teams.forEach((t) => { (byKey[t.key] = byKey[t.key] || []).push({ group: g, team: t }); });
+  });
+  byKey["Singles"] = groups.map((g) => ({ group: g, team: { id: `${g.id}_singles`, key: "Singles", category: "Singles", label: "Expert Singles", groupId: g.id, p1Id: g.captainId, p2Id: null } }));
+
+  const order = ["Mixed", "Intermediate-A", "Intermediate-B", "Intermediate-C", "Intermediate-D", "Novice", "Novice-A", "Novice-B", "Novice-C", "Singles"];
+  const keys = Object.keys(byKey).sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  });
+
+  const matches = [];
+  keys.forEach((key) => {
+    const entries = byKey[key];
+    if (entries.length < 2) return;
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const A = entries[i], B = entries[j];
+        const label = A.team.category === "Singles"
+          ? `Expert: ${A.group.label} vs ${B.group.label}`
+          : `${A.team.category}: ${A.group.label} vs ${B.group.label}`;
+        matches.push({
+          id: `${key}__${A.group.id}_${B.group.id}`, key, category: A.team.category, label,
+          groupA: A.group, teamA: A.team, groupB: B.group, teamB: B.team,
+        });
+      }
+    }
+  });
+  return matches;
+}
+
+// Greedy round scheduler: a round holds up to `courtCount` matches; a match may
+// join a round only if neither expert it needs (Mixed/Singles only) nor either of
+// its two teams is already committed elsewhere in that round. This is what
+// automatically enforces the "only 1 Expert-match at a time per pair of Experts"
+// rule from the source workbook — it falls out of the token bookkeeping rather
+// than being special-cased, so it generalizes to any number of Experts/groups.
+function scheduleMatches(matches, courtCount) {
+  const remaining = [...matches];
+  const rounds = [];
+  const teamToken = (t) => (t.p2Id === null && t.category === "Singles" ? `S:${t.p1Id}` : `T:${t.groupId}:${t.key}`);
+  const expertTokens = (m) => (m.category === "Mixed" || m.category === "Singles")
+    ? [`E:${m.groupA.captainId}`, `E:${m.groupB.captainId}`] : [];
+
+  while (remaining.length > 0) {
+    const used = new Set();
+    const round = [];
+    for (let i = 0; i < remaining.length && round.length < Math.max(1, courtCount); i++) {
+      const m = remaining[i];
+      const toks = [...expertTokens(m), teamToken(m.teamA), teamToken(m.teamB)];
+      if (toks.some((t) => used.has(t))) continue;
+      toks.forEach((t) => used.add(t));
+      round.push(m);
+    }
+    if (round.length === 0) break; // shouldn't happen — safety valve against an infinite loop
+    round.forEach((m) => { remaining.splice(remaining.indexOf(m), 1); });
+    rounds.push(round);
+  }
+  return rounds;
+}
+
+// ============================ Firebase ============================
+
+let db = null;
+let auth = null;
+let firebaseReady = false;
+let firebaseConfigMissing = true;
+try {
+  const cfg = window.FIREBASE_CONFIG || {};
+  firebaseConfigMissing = !cfg.apiKey || cfg.apiKey.indexOf("PASTE_YOUR") === 0;
+  if (!firebaseConfigMissing) {
+    firebase.initializeApp(cfg);
+    db = firebase.firestore();
+    auth = firebase.auth();
+    firebaseReady = true;
+  }
+} catch (e) {
+  console.error("Firebase init failed", e);
+}
+
+function getDocRef() {
+  return db.collection("tournaments").doc(window.TOURNAMENT_ID || "default");
+}
+
+// ============================ App ============================
+
+function SetupScreen() {
+  return (
+    <div style={{ fontFamily: "'Inter', sans-serif", background: "#F7F5EE", minHeight: "100vh", padding: 24, color: "#16211F" }}>
+      <div style={{ maxWidth: 560, margin: "40px auto", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 14, padding: 24 }}>
+        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 700, marginBottom: 10, textTransform: "uppercase" }}>
+          Firebase config needed
+        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: "#3a423f" }}>
+          This page needs a live Firestore database to sync scores across every device in real time.
+          Open <code>index.html</code>, find the <code>FIREBASE_CONFIG</code> block near the top, and paste in
+          your Firebase project's web config (apiKey, projectId, etc.) — then re-upload the file.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function emptyRoster() {
+  return [];
+}
+
+function GroupTournamentApp() {
+  const [eventName, setEventName] = useState("RHI-PSCC Group Tournament · Aug 21");
+  const [roster, setRoster] = useState(emptyRoster());
+  const [groups, setGroups] = useState([]); // [] until first shuffle
+  const [matchScores, setMatchScores] = useState({});
+  const [courtOverrides, setCourtOverrides] = useState({});
+  const [courtCount, setCourtCount] = useState(DEFAULT_COURT_COUNT);
+  const [minutesPerMatch, setMinutesPerMatch] = useState(DEFAULT_MINUTES);
+
+  const [tab, setTab] = useState("roster");
+  const [loaded, setLoaded] = useState(false);
+  const [toast, setToast] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [syncState, setSyncState] = useState("connecting");
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [expandedGroupIds, setExpandedGroupIds] = useState(() => new Set());
+
+  const editingRoster = useRef(false);
+  const nextIdRef = useRef(1);
+  const newPlayerId = () => `p${Date.now()}_${nextIdRef.current++}`;
+
+  // Same per-field-per-id race guard as the doubles-bracket app: a remote
+  // Firestore snapshot can echo back a version of the doc that predates a write
+  // still in flight (typing two match scores within the same second, etc).
+  // Without this, that stale echo would overwrite what was just typed.
+  const pendingEdits = useRef({ matchScores: {}, courtOverrides: {} });
+  const markPending = (field, id) => { const m = pendingEdits.current[field]; m[id] = (m[id] || 0) + 1; };
+  const clearPending = (field, id) => { const m = pendingEdits.current[field]; const n = (m[id] || 1) - 1; if (n <= 0) delete m[id]; else m[id] = n; };
+  const mergeGuarded = (field, remoteMap, localMap) => {
+    const pending = pendingEdits.current[field];
+    const merged = { ...remoteMap };
+    Object.keys(pending).forEach((id) => { if (pending[id] && localMap[id] !== undefined) merged[id] = localMap[id]; });
+    return merged;
+  };
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2200); };
+
+  const applyRemoteData = (data) => {
+    if (!data) return;
+    if (typeof data.eventName === "string") setEventName(data.eventName);
+    if (data.roster && !editingRoster.current) setRoster(data.roster);
+    if (data.groups) setGroups(data.groups);
+    if (data.matchScores) setMatchScores((prev) => mergeGuarded("matchScores", data.matchScores, prev));
+    if (data.courtOverrides) setCourtOverrides((prev) => mergeGuarded("courtOverrides", data.courtOverrides, prev));
+    if (typeof data.courtCount === "number") setCourtCount(data.courtCount);
+    if (typeof data.minutesPerMatch === "number") setMinutesPerMatch(data.minutesPerMatch);
+  };
+
+  useEffect(() => {
+    if (!firebaseReady) { setLoaded(true); setSyncState("error"); return; }
+    const unsubAuth = auth.onAuthStateChanged((user) => setIsAdmin(!!user));
+    const unsub = getDocRef().onSnapshot(
+      (snap) => { if (snap.exists) applyRemoteData(snap.data()); setLoaded(true); setSyncState("live"); },
+      (err) => { console.error("Firestore listen error", err); setLoaded(true); setSyncState("error"); }
+    );
+    return () => { unsub && unsub(); unsubAuth && unsubAuth(); };
+  }, []);
+
+  const patch = async (obj) => {
+    if (!firebaseReady) { showToast("Not connected — changes won't be saved"); return; }
+    try { await getDocRef().set(obj, { merge: true }); }
+    catch (e) { console.error("save failed", e); showToast("Sync error — check connection"); }
+  };
+
+  const tryUnlock = async () => {
+    if (!firebaseReady) { showToast("Not connected — try again in a moment"); return; }
+    setUnlocking(true);
+    try {
+      await auth.signInWithEmailAndPassword(ADMIN_EMAIL, pinInput);
+      setPinOpen(false); setPinInput(""); showToast("Admin mode unlocked");
+    } catch (e) { showToast("Wrong password"); setPinInput(""); }
+    finally { setUnlocking(false); }
+  };
+  const lockAdmin = () => { auth.signOut(); showToast("Switched to view-only"); };
+
+  const byId = useMemo(() => rosterMap(roster), [roster]);
+
+  // ---- roster editing ----
+  const addPlayer = (name, rank) => {
+    const trimmed = (name || "").trim();
+    if (!trimmed) return;
+    const next = [...roster, { id: newPlayerId(), name: trimmed, rank: rank || "Intermediate" }];
+    setRoster(next); patch({ roster: next });
+  };
+  const updatePlayer = (id, fields) => {
+    const next = roster.map((p) => (p.id === id ? { ...p, ...fields } : p));
+    setRoster(next); patch({ roster: next });
+  };
+  const removePlayer = (id) => {
+    const next = roster.filter((p) => p.id !== id);
+    setRoster(next); patch({ roster: next });
+  };
+  const applyBulkRoster = () => {
+    // "Name, Rank" or "Name - Rank" per line; rank defaults to Intermediate if omitted/unrecognized.
+    const lines = bulkText.split(/\n/).map((l) => l.trim()).filter(Boolean);
+    const added = lines.map((line) => {
+      const parts = line.split(/\s*,\s*/);
+      const name = (parts[0] || "").trim();
+      const rankGuess = (parts[1] || "").trim().toLowerCase();
+      const rank = rankGuess.startsWith("exp") ? "Expert" : rankGuess.startsWith("nov") ? "Novice" : rankGuess.startsWith("int") ? "Intermediate" : "Intermediate";
+      return name ? { id: newPlayerId(), name, rank } : null;
+    }).filter(Boolean);
+    if (added.length === 0) { showToast("Nothing to add"); return; }
+    const next = [...roster, ...added];
+    setRoster(next); patch({ roster: next });
+    setBulkOpen(false); setBulkText("");
+    showToast(`Added ${added.length} player${added.length === 1 ? "" : "s"}`);
+  };
+
+  const rosterCounts = useMemo(() => {
+    const c = { Expert: 0, Intermediate: 0, Novice: 0 };
+    roster.forEach((p) => { c[p.rank] = (c[p.rank] || 0) + 1; });
+    return c;
+  }, [roster]);
+
+  // ---- roster self-audit (mirrors the workbook's "Novice Roster Check") ----
+  const assignmentAudit = useMemo(() => {
+    // Captains are intentionally NOT counted here on top of their team slots — a
+    // group's captain always also appears as the Mixed team's p1Id (that's the
+    // same person, not a second assignment), so counting both would flag every
+    // captain as "assigned twice" even on a perfectly clean shuffle.
+    const seen = {};
+    groups.forEach((g) => {
+      g.teams.forEach((t) => {
+        if (t.p1Id) seen[t.p1Id] = (seen[t.p1Id] || 0) + 1;
+        if (t.p2Id) seen[t.p2Id] = (seen[t.p2Id] || 0) + 1;
+      });
+    });
+    const unassigned = roster.filter((p) => !seen[p.id]);
+    const doubled = roster.filter((p) => seen[p.id] > 1);
+    const expertsNotCaptaining = roster.filter((p) => p.rank === "Expert" && !groups.some((g) => g.captainId === p.id));
+    return { unassigned, doubled, expertsNotCaptaining, stale: groups.length > 0 && roster.filter((p) => p.rank === "Expert").length !== groups.length };
+  }, [roster, groups]);
+
+  // ---- shuffle / rebuild groups ----
+  const shuffleGroups = () => {
+    if (rosterCounts.Expert < 1) { showToast("Add at least 1 Expert to captain a group first"); return; }
+    const next = autoAssignGroups(roster);
+    setGroups(next);
+    setMatchScores({}); setCourtOverrides({});
+    patch({ groups: next, matchScores: {}, courtOverrides: {} });
+    setTab("groups");
+    showToast("Groups shuffled");
+  };
+
+  // ---- move-a-player editing (admin dropdowns on the Groups tab) ----
+  const setTeamSlot = (groupId, teamId, slot, playerId) => {
+    const next = groups.map((g) => g.id !== groupId ? g : {
+      ...g,
+      teams: g.teams.map((t) => t.id !== teamId ? t : { ...t, [slot]: playerId || null }),
+    });
+    setGroups(next); patch({ groups: next });
+  };
+  // Keeps the Mixed team's p1Id (which is *displayed* from the team object, not
+  // re-derived from captainId) in lockstep with the captain change — otherwise
+  // the Mixed team card would keep showing the outgoing captain's name.
+  const setCaptain = (groupId, playerId) => {
+    const next = groups.map((g) => g.id !== groupId ? g : {
+      ...g,
+      captainId: playerId,
+      teams: g.teams.map((t) => (t.key === "Mixed" ? { ...t, p1Id: playerId } : t)),
+    });
+    setGroups(next); patch({ groups: next });
+  };
+
+  // ---- derived: matches, schedule, standings ----
+  const matches = useMemo(() => buildMatches(groups, byId), [groups, byId]);
+  const rounds = useMemo(() => scheduleMatches(matches, courtCount), [matches, courtCount]);
+
+  const isValidScorePair = (s) => s && typeof s === "object" && Number.isFinite(s.a) && Number.isFinite(s.b);
+  const matchResult = (m) => {
+    const s = matchScores[m.id];
+    if (!isValidScorePair(s)) return { status: "pending" };
+    if (s.a === s.b) return { status: "tie", scoreA: s.a, scoreB: s.b };
+    return { status: "done", winnerGroupId: s.a > s.b ? m.groupA.id : m.groupB.id, scoreA: s.a, scoreB: s.b };
+  };
+
+  const standings = useMemo(() => {
+    const points = {}; const played = {};
+    groups.forEach((g) => { points[g.id] = 0; played[g.id] = 0; });
+    matches.forEach((m) => {
+      const r = matchResult(m);
+      if (r.status === "pending") return;
+      played[m.groupA.id] = (played[m.groupA.id] || 0) + 1;
+      played[m.groupB.id] = (played[m.groupB.id] || 0) + 1;
+      if (r.status === "done") points[r.winnerGroupId] = (points[r.winnerGroupId] || 0) + 1;
+    });
+    const rows = groups.map((g) => ({ group: g, points: points[g.id] || 0, played: played[g.id] || 0, total: matches.filter((m) => m.groupA.id === g.id || m.groupB.id === g.id).length }));
+    return rows.sort((a, b) => b.points - a.points);
+  }, [groups, matches, matchScores]);
+
+  const champion = useMemo(() => {
+    if (standings.length === 0) return null;
+    const allDone = matches.every((m) => matchResult(m).status !== "pending");
+    if (!allDone || matches.length === 0) return null;
+    const top = standings[0].points;
+    const leaders = standings.filter((s) => s.points === top);
+    return leaders.length === 1 ? leaders[0].group : { tie: leaders.map((l) => l.group) };
+  }, [standings, matches, matchScores]);
+
+  // ---- scoring ----
+  const setScoreSide = (matchId, side, rawValue) => {
+    const n = rawValue === "" ? null : Number(rawValue);
+    const val = Number.isFinite(n) ? n : null;
+    setMatchScores((prev) => {
+      const existing = prev[matchId];
+      const base = existing && typeof existing === "object" ? existing : { a: null, b: null };
+      const nextEntry = { ...base, [side]: val };
+      markPending("matchScores", matchId);
+      patch({ matchScores: { [matchId]: nextEntry } }).finally(() => clearPending("matchScores", matchId));
+      return { ...prev, [matchId]: nextEntry };
+    });
+  };
+
+  const setCourtOverride = (matchId, courtNum) => {
+    const next = { ...courtOverrides, [matchId]: courtNum };
+    setCourtOverrides(next);
+    markPending("courtOverrides", matchId);
+    patch({ courtOverrides: { [matchId]: courtNum } }).finally(() => clearPending("courtOverrides", matchId));
+  };
+
+  // ---- round/court display with per-match court number (auto round-robin within
+  // the round, overridable) ----
+  const roundsWithCourts = useMemo(() => {
+    return rounds.map((round, ri) => ({
+      roundNum: ri + 1,
+      matches: round.map((m, idx) => {
+        const auto = (idx % courtCount) + 1;
+        return { ...m, court: courtOverrides[m.id] || auto, autoCourt: auto };
+      }),
+    }));
+  }, [rounds, courtCount, courtOverrides]);
+
+  const timeEstimate = rounds.length * minutesPerMatch;
+
+  // ---- find my match ----
+  const findResults = useMemo(() => {
+    const q = findQuery.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const results = [];
+    roundsWithCourts.forEach((r) => {
+      r.matches.forEach((m) => {
+        const names = [m.teamA.p1Id, m.teamA.p2Id, m.teamB.p1Id, m.teamB.p2Id].map((id) => playerName(id, byId).toLowerCase());
+        if (names.some((n) => n.includes(q))) {
+          const res = matchResult(m);
+          results.push({ round: r.roundNum, m, res });
+        }
+      });
+    });
+    return results;
+  }, [findQuery, roundsWithCourts, byId, matchScores]);
+
+  const toggleGroupExpanded = (id) => {
+    setExpandedGroupIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  };
+
+  if (firebaseConfigMissing) return <SetupScreen />;
+  if (!loaded) return <div style={{ padding: 40, fontFamily: "Inter, sans-serif", color: "#6C7A76" }}>Loading…</div>;
+
+  return (
+    <div style={styles.app}>
+      <header style={styles.header}>
+        <div style={styles.headerLine} />
+        <div style={styles.headerRow}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={styles.eyebrow}>{syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}</div>
+            {isAdmin ? (
+              <input value={eventName} onChange={(e) => setEventName(e.target.value)} onBlur={() => patch({ eventName })} style={styles.eventNameInput} />
+            ) : (
+              <h1 style={styles.h1}>{eventName}</h1>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+            <div style={styles.courtBadge}>{courtCount} COURTS · {groups.length} GROUPS</div>
+            {isAdmin ? (
+              <button style={styles.adminPillOn} onClick={lockAdmin}>Admin ✓ (tap to lock)</button>
+            ) : (
+              <button style={styles.adminPillOff} onClick={() => setPinOpen(!pinOpen)}>Admin sign-in</button>
+            )}
+          </div>
+        </div>
+        {pinOpen && !isAdmin && (
+          <div style={styles.pinRow}>
+            <input value={pinInput} onChange={(e) => setPinInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !unlocking && tryUnlock()} placeholder="Enter admin password" type="password" autoComplete="current-password" disabled={unlocking} style={styles.pinInput} />
+            <button style={styles.primaryBtn} onClick={tryUnlock} disabled={unlocking}>{unlocking ? "Checking…" : "Unlock"}</button>
+          </div>
+        )}
+      </header>
+
+      {!isAdmin && <div style={styles.viewBanner}>👀 View-only — updates from the organizer appear here automatically, no refresh needed.</div>}
+      {syncState === "error" && <div style={styles.errorBanner}>⚠️ Not connected to the live database. Changes won't sync to other devices.</div>}
+
+      <div style={styles.findBar}>
+        <input value={findQuery} onChange={(e) => setFindQuery(e.target.value)} placeholder="🔎 Find your match — type your name" style={styles.findInput} />
+        {findQuery.trim().length >= 2 && (
+          <div style={styles.findResults}>
+            {findResults.length === 0 && <div style={styles.findEmpty}>No match found yet for "{findQuery}"</div>}
+            {findResults.map((r, i) => (
+              <div key={i} style={styles.findCard}>
+                <div style={styles.findStage}>Round {r.round} · {r.m.category}</div>
+                <div style={styles.findLine}><strong>{teamLabelFromIds(r.m.teamA, byId)}</strong> vs {teamLabelFromIds(r.m.teamB, byId)}</div>
+                <div style={styles.findMeta}>
+                  <span style={styles.courtTag}>Court {r.m.court}</span>
+                  <span style={styles.findStatus}>{r.res.status === "done" ? `Final ${r.res.scoreA}-${r.res.scoreB}` : r.res.status === "tie" ? "Tied — replay" : "Waiting"}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <nav style={styles.tabs}>
+        {[
+          { key: "roster", label: `Roster (${roster.length})` },
+          { key: "groups", label: `Groups (${groups.length})` },
+          { key: "schedule", label: "Schedule" },
+          { key: "standings", label: "Standings" },
+        ].map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{ ...styles.tabBtn, ...(tab === t.key ? styles.tabBtnActive : {}) }}>{t.label}</button>
+        ))}
+      </nav>
+
+      <main style={styles.main}>
+        {tab === "roster" && (
+          <RosterTab
+            roster={roster} isAdmin={isAdmin} rosterCounts={rosterCounts}
+            addPlayer={addPlayer} updatePlayer={updatePlayer} removePlayer={removePlayer}
+            editingRoster={editingRoster} patch={patch}
+            bulkOpen={bulkOpen} setBulkOpen={setBulkOpen} bulkText={bulkText} setBulkText={setBulkText} applyBulkRoster={applyBulkRoster}
+            shuffleGroups={shuffleGroups} hasGroups={groups.length > 0} audit={assignmentAudit}
+          />
+        )}
+
+        {tab === "groups" && (
+          <GroupsTab
+            groups={groups} roster={roster} byId={byId} isAdmin={isAdmin} audit={assignmentAudit}
+            shuffleGroups={shuffleGroups} setTeamSlot={setTeamSlot} setCaptain={setCaptain}
+            expandedGroupIds={expandedGroupIds} toggleGroupExpanded={toggleGroupExpanded}
+            setTab={setTab}
+          />
+        )}
+
+        {tab === "schedule" && (
+          <ScheduleTab
+            groups={groups} matches={matches} roundsWithCourts={roundsWithCourts} byId={byId} isAdmin={isAdmin}
+            courtCount={courtCount} setCourtCount={(v) => { setCourtCount(v); patch({ courtCount: v }); }}
+            minutesPerMatch={minutesPerMatch} setMinutesPerMatch={(v) => { setMinutesPerMatch(v); patch({ minutesPerMatch: v }); }}
+            timeEstimate={timeEstimate} matchScores={matchScores} setScoreSide={setScoreSide}
+            courtOverrides={courtOverrides} setCourtOverride={setCourtOverride} matchResult={matchResult}
+          />
+        )}
+
+        {tab === "standings" && (
+          <StandingsTab standings={standings} matches={matches} matchResult={matchResult} byId={byId} champion={champion} />
+        )}
+      </main>
+
+      {toast && <div style={styles.toast}>{toast}</div>}
+    </div>
+  );
+}
+
+// ============================ Roster tab ============================
+
+function RosterTab({ roster, isAdmin, rosterCounts, addPlayer, updatePlayer, removePlayer, editingRoster, patch, bulkOpen, setBulkOpen, bulkText, setBulkText, applyBulkRoster, shuffleGroups, hasGroups, audit }) {
+  const [newName, setNewName] = useState("");
+  const [newRank, setNewRank] = useState("Intermediate");
+
+  return (
+    <section>
+      <div style={styles.sectionHead}>
+        <h2 style={styles.h2}>Roster</h2>
+        {isAdmin && <button style={styles.linkBtn} onClick={() => setBulkOpen(!bulkOpen)}>{bulkOpen ? "Close paste box" : "Paste roster"}</button>}
+      </div>
+      <p style={styles.mutedSmall}>
+        {rosterCounts.Expert} Expert{rosterCounts.Expert === 1 ? "" : "s"} (1 per group) · {rosterCounts.Intermediate} Intermediate · {rosterCounts.Novice} Novice
+      </p>
+
+      {isAdmin && bulkOpen && (
+        <div style={styles.card}>
+          <textarea value={bulkText} onChange={(e) => setBulkText(e.target.value)} placeholder={"One player per line: Name, Rank\nAshwin, Expert\nAJ, Intermediate\nCarrie, Novice\n…"} rows={6} style={styles.textarea} />
+          <button style={styles.primaryBtn} onClick={applyBulkRoster}>Add players</button>
+        </div>
+      )}
+
+      {isAdmin && (
+        <div style={styles.card}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+            <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Player name" style={{ ...styles.input, border: "1px solid #E4E0D2", borderRadius: 8, padding: "8px 10px", flex: 1 }} />
+            <select value={newRank} onChange={(e) => setNewRank(e.target.value)} style={styles.rankSelect}>
+              {RANKS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <button style={styles.primaryBtn} onClick={() => { addPlayer(newName, newRank); setNewName(""); }}>Add</button>
+          </div>
+          <p style={styles.mutedSmall}>Use this for roster exceptions — a late signup, a no-show removal, or fixing someone's skill level.</p>
+        </div>
+      )}
+
+      {(audit.unassigned.length > 0 || audit.doubled.length > 0 || audit.expertsNotCaptaining.length > 0 || audit.stale) && hasGroups && (
+        <div style={styles.warnCard}>
+          {audit.stale && <div>⚠️ Roster's Expert count no longer matches the number of groups built — reshuffle to pick up the change.</div>}
+          {audit.expertsNotCaptaining.length > 0 && <div>⚠️ Not captaining a group: {audit.expertsNotCaptaining.map((p) => p.name).join(", ")}</div>}
+          {audit.unassigned.length > 0 && <div>⚠️ Not assigned to any team: {audit.unassigned.map((p) => p.name).join(", ")}</div>}
+          {audit.doubled.length > 0 && <div>⚠️ Assigned to more than one slot: {audit.doubled.map((p) => p.name).join(", ")}</div>}
+        </div>
+      )}
+
+      <div style={styles.rosterList}>
+        {roster.map((p) => (
+          <div key={p.id} style={styles.rosterRow}>
+            <input
+              value={p.name} disabled={!isAdmin}
+              onFocus={() => { editingRoster.current = true; }}
+              onChange={(e) => updatePlayer(p.id, { name: e.target.value })}
+              onBlur={() => { editingRoster.current = false; }}
+              style={{ ...styles.input, ...(!isAdmin ? styles.inputDisabled : {}) }}
+            />
+            <select value={p.rank} disabled={!isAdmin} onChange={(e) => updatePlayer(p.id, { rank: e.target.value })} style={styles.rankSelect}>
+              {RANKS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            {isAdmin && <button style={styles.removeBtn} onClick={() => removePlayer(p.id)}>✕</button>}
+          </div>
+        ))}
+        {roster.length === 0 && <p style={styles.muted}>No players yet — paste a roster or add players above.</p>}
+      </div>
+
+      {isAdmin && roster.length > 0 && (
+        <button style={styles.primaryBtnLg} onClick={shuffleGroups}>
+          {hasGroups ? "Reshuffle groups →" : "Shuffle into groups →"}
+        </button>
+      )}
+      {!isAdmin && <p style={styles.muted}>Sign in as admin to edit the roster or shuffle groups.</p>}
+    </section>
+  );
+}
+
+// ============================ Groups tab ============================
+
+function GroupsTab({ groups, roster, byId, isAdmin, audit, shuffleGroups, setTeamSlot, setCaptain, expandedGroupIds, toggleGroupExpanded, setTab }) {
+  const experts = roster.filter((p) => p.rank === "Expert");
+  const intermediates = roster.filter((p) => p.rank === "Intermediate");
+  const novices = roster.filter((p) => p.rank === "Novice");
+  const poolFor = (category) => category === "Intermediate" ? intermediates : category === "Mixed" ? novices : category.startsWith("Novice") ? novices : [];
+
+  return (
+    <section>
+      <div style={styles.sectionHead}>
+        <h2 style={styles.h2}>Groups &amp; teams</h2>
+        {isAdmin && groups.length > 0 && <button style={styles.linkBtn} onClick={shuffleGroups}>Reshuffle</button>}
+      </div>
+      {groups.length === 0 ? (
+        <p style={styles.muted}>No groups yet — go to Roster and shuffle first.</p>
+      ) : (
+        <>
+          <p style={styles.mutedSmall}>Every match is cross-group only — a group's own teams never play each other. {isAdmin ? "Use the dropdowns below to move anyone into a different slot after the shuffle." : "Tap a group to see its lineup."}</p>
+          {groups.map((g) => {
+            const isOpen = expandedGroupIds.has(g.id) || isAdmin;
+            return (
+              <div key={g.id} style={styles.groupCard}>
+                <button style={styles.groupHead} onClick={() => toggleGroupExpanded(g.id)}>
+                  <span style={{ ...styles.standChevron, ...(isOpen ? styles.standChevronOpen : {}) }}>▸</span>
+                  <span style={styles.groupTitle}>{g.label}</span>
+                  <span style={styles.groupCaptain}>Captain: {isAdmin ? (
+                    <select value={g.captainId || ""} onClick={(e) => e.stopPropagation()} onChange={(e) => setCaptain(g.id, e.target.value)} style={styles.rankSelect}>
+                      {experts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  ) : playerName(g.captainId, byId)}</span>
+                </button>
+                {isOpen && (
+                  <div style={styles.groupBody}>
+                    {g.teams.map((t) => {
+                      const pool = poolFor(t.key.startsWith("Intermediate") ? "Intermediate" : t.key);
+                      return (
+                        <div key={t.id} style={styles.teamRowEdit}>
+                          <span style={styles.teamCategoryTag}>{t.label}</span>
+                          {isAdmin ? (
+                            <div style={{ display: "flex", gap: 6, flex: 1, flexWrap: "wrap" }}>
+                              {t.key === "Mixed" ? (
+                                <span style={styles.fixedPlayer}>{playerName(t.p1Id, byId)} (captain)</span>
+                              ) : (
+                                <select value={t.p1Id || ""} onChange={(e) => setTeamSlot(g.id, t.id, "p1Id", e.target.value)} style={styles.rankSelect}>
+                                  <option value="">— empty —</option>
+                                  {pool.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                </select>
+                              )}
+                              <select value={t.p2Id || ""} onChange={(e) => setTeamSlot(g.id, t.id, "p2Id", e.target.value)} style={styles.rankSelect}>
+                                <option value="">— BYE PARTNER —</option>
+                                {pool.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                              </select>
+                            </div>
+                          ) : (
+                            <span>{teamLabelFromIds(t, byId)}</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {(audit.unassigned.length > 0 || audit.doubled.length > 0) && (
+            <p style={styles.warnLine}>⚠️ Some players aren't cleanly assigned — check the Roster tab for details.</p>
+          )}
+          <button style={styles.primaryBtnLg} onClick={() => setTab("schedule")}>{isAdmin ? "Build the schedule →" : "View the schedule →"}</button>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ============================ Schedule tab ============================
+
+function ScheduleTab({ groups, matches, roundsWithCourts, byId, isAdmin, courtCount, setCourtCount, minutesPerMatch, setMinutesPerMatch, timeEstimate, matchScores, setScoreSide, courtOverrides, setCourtOverride, matchResult }) {
+  const [roundTab, setRoundTab] = useState(0);
+  useEffect(() => { if (roundTab >= roundsWithCourts.length) setRoundTab(0); }, [roundsWithCourts.length]);
+
+  if (groups.length === 0) return <section><p style={styles.muted}>Shuffle groups first.</p></section>;
+  if (matches.length === 0) return <section><p style={styles.muted}>Need at least 2 groups before any cross-group matches exist.</p></section>;
+
+  const maxConcurrentExpertMatches = Math.floor(groups.length / 2);
+  const active = roundsWithCourts[roundTab] || { matches: [] };
+
+  return (
+    <section>
+      <div style={styles.formatNote}>
+        All {matches.length} matches are round-robin, cross-group only — enter scores in any order. With {groups.length} group{groups.length === 1 ? "" : "s"} captaining Experts, at most {maxConcurrentExpertMatches || 1} Expert-involving match{maxConcurrentExpertMatches === 1 ? "" : "es"} can run at once, which sets the schedule's real floor regardless of court count.
+      </div>
+
+      {isAdmin && (
+        <div style={styles.timeCard}>
+          <div style={styles.timeRow}>
+            <span>Number of courts</span>
+            <div style={styles.stepper}>
+              <button style={styles.stepperBtn} onClick={() => setCourtCount(Math.max(1, courtCount - 1))}>−</button>
+              <input type="number" min={1} max={12} value={courtCount} onChange={(e) => setCourtCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))} style={styles.stepperInput} />
+              <button style={styles.stepperBtn} onClick={() => setCourtCount(Math.min(12, courtCount + 1))}>+</button>
+            </div>
+          </div>
+          <div style={styles.timeRow}>
+            <span>Minutes per match</span>
+            <input type="number" min={5} max={60} value={minutesPerMatch} onChange={(e) => setMinutesPerMatch(Number(e.target.value) || 15)} style={styles.miniInput} />
+          </div>
+          <div style={styles.timeRow}>
+            <span>{roundsWithCourts.length} rounds · est. total time</span>
+            <strong style={{ color: "#0F5257" }}>{Math.round(timeEstimate / 60 * 10) / 10}h ({timeEstimate}m)</strong>
+          </div>
+        </div>
+      )}
+
+      <div style={styles.roundTabs}>
+        {roundsWithCourts.map((r, i) => (
+          <button key={i} onClick={() => setRoundTab(i)} style={{ ...styles.roundTabBtn, ...(roundTab === i ? styles.roundTabBtnActive : {}) }}>Round {r.roundNum}</button>
+        ))}
+      </div>
+
+      <div style={styles.matchList}>
+        {active.matches.map((m) => {
+          const res = matchResult(m);
+          const existing = matchScores[m.id];
+          const struct = existing && typeof existing === "object" ? existing : { a: null, b: null };
+          return (
+            <div key={m.id} style={styles.matchCard}>
+              <div style={styles.matchMeta}>
+                <span style={styles.courtTag}>Court {m.court}</span>
+                <span style={styles.categoryTag}>{m.category}</span>
+                {isAdmin && (
+                  <select value={courtOverrides[m.id] || ""} onChange={(e) => setCourtOverride(m.id, e.target.value ? Number(e.target.value) : null)} style={styles.courtSelect}>
+                    <option value="">Auto (Court {m.autoCourt})</option>
+                    {Array.from({ length: courtCount }, (_, i) => i + 1).map((c) => <option key={c} value={c}>Move to Court {c}</option>)}
+                  </select>
+                )}
+              </div>
+              <div style={styles.matchTeams}>
+                {[{ side: "a", team: m.teamA, group: m.groupA }, { side: "b", team: m.teamB, group: m.groupB }].map(({ side, team, group }) => {
+                  const isWinner = res.status === "done" && res.winnerGroupId === group.id;
+                  return (
+                    <div key={side} style={styles.teamScoreRow}>
+                      <div style={{ ...styles.sideBtn, ...(isWinner ? styles.sideBtnWin : {}) }}>
+                        {isWinner && <span style={styles.trophyMark}>🏆 </span>}
+                        <div>{team.category === "Singles" ? playerName(team.p1Id, byId) : teamLabelFromIds(team, byId)}</div>
+                        <div style={styles.groupSubLabel}>{group.label}</div>
+                      </div>
+                      {isAdmin ? (
+                        <input
+                          key={m.id + "_" + side + "_" + (struct[side] ?? "")}
+                          type="number" min={0} max={99} defaultValue={struct[side] ?? ""} placeholder="pts"
+                          onBlur={(e) => setScoreSide(m.id, side, e.target.value)}
+                          style={styles.scoreInputInline}
+                        />
+                      ) : (
+                        Number.isFinite(struct[side]) && <div style={styles.scoreDisplayInline}>{struct[side]}</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={styles.winnerNote}>
+                {res.status === "done" ? "Winner set automatically from the score — edit either score to change it"
+                  : res.status === "tie" ? "Tied — replay to settle this one"
+                  : isAdmin ? "Enter both scores" : "Result pending"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ============================ Standings tab ============================
+
+function StandingsTab({ standings, matches, matchResult, byId, champion }) {
+  return (
+    <section>
+      <h2 style={styles.h2}>Standings</h2>
+      {standings.length === 0 ? <p style={styles.muted}>Shuffle groups first.</p> : (
+        <>
+          <p style={styles.mutedSmall}>1 point per match win across every category, all weighted equally. A tied score counts as played but awards no point to either side — replay it.</p>
+          <div style={styles.standingsList}>
+            {standings.map((row, i) => (
+              <div key={row.group.id} style={styles.standCard}>
+                <div style={styles.standRowStatic}>
+                  <span style={styles.rankNum}>{i + 1}</span>
+                  <span style={styles.standName}>{row.group.label}</span>
+                  <span style={styles.recordText}>{row.points} pt{row.points === 1 ? "" : "s"}</span>
+                  <span style={styles.diffText}>{row.played}/{row.total} played</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          {champion && !champion.tie && matches.length > 0 && (
+            <div style={styles.championCard}>🏆 Champions: {champion.label}</div>
+          )}
+          {champion && champion.tie && (
+            <div style={styles.championCard}>🏆 Tied for first: {champion.tie.map((g) => g.label).join(" & ")}</div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+const styles = {
+  app: { fontFamily: "'Inter', sans-serif", background: "#F7F5EE", minHeight: "100vh", color: "#16211F", paddingBottom: 40 },
+  header: { position: "relative", padding: "20px 20px 16px", overflow: "hidden" },
+  headerLine: { position: "absolute", top: 0, left: 0, right: 0, height: 6, background: "linear-gradient(90deg,#0F5257,#C4D93B)" },
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 10, gap: 10 },
+  eyebrow: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: 1.5, color: "#0F5257", fontWeight: 700 },
+  h1: { fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 700, margin: "4px 0 0", letterSpacing: 0.3, textTransform: "uppercase" },
+  eventNameInput: { fontFamily: "'Oswald', sans-serif", fontSize: 20, fontWeight: 700, margin: "4px 0 0", letterSpacing: 0.3, textTransform: "uppercase", border: "1px solid #E4E0D2", borderRadius: 6, padding: "4px 8px", width: "100%", background: "#fff" },
+  courtBadge: { background: "#16211F", color: "#C4D93B", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 6, whiteSpace: "nowrap" },
+  adminPillOn: { background: "#C4D93B", color: "#16211F", border: "none", fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 6, whiteSpace: "nowrap" },
+  adminPillOff: { background: "transparent", color: "#6C7A76", border: "1px solid #E4E0D2", fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 6, whiteSpace: "nowrap" },
+  pinRow: { display: "flex", gap: 8, marginTop: 10 },
+  pinInput: { flex: 1, border: "1px solid #E4E0D2", borderRadius: 8, padding: "9px 10px", fontSize: 14, background: "#fff" },
+  viewBanner: { background: "#FBF3D9", color: "#8A6D1B", fontSize: 12.5, fontWeight: 600, padding: "9px 16px", lineHeight: 1.4 },
+  errorBanner: { background: "#F5E4E1", color: "#8A3A2E", fontSize: 12.5, fontWeight: 600, padding: "9px 16px", lineHeight: 1.4 },
+  findBar: { padding: "12px 16px 0" },
+  findInput: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 10, padding: "11px 12px", fontSize: 14, background: "#fff" },
+  findResults: { marginTop: 8, display: "flex", flexDirection: "column", gap: 6 },
+  findEmpty: { fontSize: 13, color: "#6C7A76", padding: "6px 2px" },
+  findCard: { background: "#16211F", color: "#F7F5EE", borderRadius: 10, padding: "10px 12px" },
+  findStage: { fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#C4D93B", fontWeight: 700, marginBottom: 4, textTransform: "uppercase" },
+  findLine: { fontSize: 13.5 },
+  findMeta: { display: "flex", gap: 8, marginTop: 6, alignItems: "center" },
+  findStatus: { fontSize: 11.5, color: "#C7C4B4" },
+  tabs: { display: "flex", gap: 6, padding: "12px 16px 12px", overflowX: "auto" },
+  tabBtn: { border: "1px solid #E4E0D2", background: "#fff", color: "#6C7A76", fontSize: 13, fontWeight: 600, padding: "8px 14px", borderRadius: 20, whiteSpace: "nowrap" },
+  tabBtnActive: { background: "#0F5257", color: "#fff", border: "1px solid #0F5257" },
+  main: { padding: "8px 16px 0" },
+  sectionHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  h2: { fontFamily: "'Oswald', sans-serif", fontSize: 19, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3, margin: 0 },
+  linkBtn: { background: "none", border: "none", color: "#0F5257", fontWeight: 700, fontSize: 13, textDecoration: "underline" },
+  muted: { color: "#6C7A76", fontSize: 14 },
+  mutedSmall: { color: "#6C7A76", fontSize: 12, marginTop: 8, marginBottom: 12, lineHeight: 1.4 },
+  card: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 14, marginBottom: 14 },
+  warnCard: { background: "#FBF3D9", color: "#8A6D1B", fontSize: 12.5, fontWeight: 600, padding: "10px 12px", borderRadius: 10, marginBottom: 14, lineHeight: 1.6 },
+  warnLine: { fontSize: 12.5, color: "#B4483A", marginTop: 4, marginBottom: 12 },
+  textarea: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 8, padding: 10, fontSize: 14, resize: "vertical", marginBottom: 10 },
+  input: { border: "none", outline: "none", fontSize: 14, flex: 1, minWidth: 0, background: "transparent" },
+  inputDisabled: { background: "#F1F0E6", color: "#A8A99C" },
+  rankSelect: { fontSize: 12.5, border: "1px solid #E4E0D2", borderRadius: 6, padding: "5px 6px", color: "#3a423f", background: "#fff" },
+  rosterList: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 },
+  rosterRow: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E4E0D2", borderRadius: 8, padding: "8px 10px" },
+  removeBtn: { background: "none", border: "none", color: "#B4483A", fontSize: 14, fontWeight: 700, padding: "0 4px" },
+  primaryBtnLg: { width: "100%", background: "#0F5257", color: "#fff", border: "none", borderRadius: 10, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Oswald', sans-serif", textTransform: "uppercase", letterSpacing: 0.5 },
+  primaryBtn: { background: "#0F5257", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700 },
+  groupCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, marginBottom: 10, overflow: "hidden" },
+  groupHead: { width: "100%", display: "flex", alignItems: "center", gap: 8, background: "transparent", border: "none", padding: "12px 14px", font: "inherit", color: "inherit", cursor: "pointer", flexWrap: "wrap" },
+  groupTitle: { fontFamily: "'Oswald', sans-serif", fontSize: 15, fontWeight: 700, textTransform: "uppercase" },
+  groupCaptain: { marginLeft: "auto", fontSize: 12.5, color: "#6C7A76", display: "flex", alignItems: "center", gap: 6 },
+  groupBody: { borderTop: "1px solid #E4E0D2", padding: "10px 14px 14px", display: "flex", flexDirection: "column", gap: 8, background: "#FBFAF5" },
+  teamRowEdit: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 13 },
+  teamCategoryTag: { fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, fontWeight: 700, color: "#0F5257", background: "#EAF3F2", padding: "3px 8px", borderRadius: 6, whiteSpace: "nowrap" },
+  fixedPlayer: { fontSize: 13, fontWeight: 600, color: "#3a423f" },
+  standChevron: { fontSize: 11, color: "#6C7A76", transition: "transform 0.15s ease", transform: "rotate(0deg)" },
+  standChevronOpen: { transform: "rotate(90deg)" },
+  formatNote: { background: "#EAF3F2", color: "#0F5257", fontSize: 12.5, fontWeight: 600, padding: "10px 12px", borderRadius: 10, marginBottom: 12, lineHeight: 1.4 },
+  timeCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 14, marginBottom: 16 },
+  timeRow: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, padding: "4px 0" },
+  miniInput: { width: 56, border: "1px solid #E4E0D2", borderRadius: 6, padding: "4px 6px", fontSize: 13, textAlign: "center" },
+  stepper: { display: "flex", alignItems: "center", gap: 6 },
+  stepperBtn: { width: 30, height: 30, border: "1px solid #E4E0D2", background: "#F7F5EE", borderRadius: 6, fontSize: 16, fontWeight: 700, color: "#0F5257" },
+  stepperInput: { width: 50, textAlign: "center", border: "1px solid #E4E0D2", borderRadius: 6, padding: "5px 4px", fontSize: 14 },
+  roundTabs: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, marginBottom: 4 },
+  roundTabBtn: { border: "1px solid #E4E0D2", background: "#fff", color: "#6C7A76", fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 8, whiteSpace: "nowrap" },
+  roundTabBtnActive: { background: "#16211F", color: "#C4D93B", border: "1px solid #16211F" },
+  matchList: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 },
+  matchCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 12 },
+  matchMeta: { marginBottom: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  courtTag: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700, color: "#0F5257", background: "#EAF3F2", padding: "3px 8px", borderRadius: 6 },
+  categoryTag: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700, color: "#6C7A76", background: "#F1F0E6", padding: "3px 8px", borderRadius: 6 },
+  courtSelect: { fontSize: 11, border: "1px solid #E4E0D2", borderRadius: 6, padding: "3px 4px", color: "#6C7A76" },
+  matchTeams: { display: "flex", flexDirection: "column", gap: 6 },
+  teamScoreRow: { display: "flex", alignItems: "stretch", gap: 6 },
+  sideBtn: { flex: 1, minWidth: 0, textAlign: "left", border: "1px solid #E4E0D2", background: "#F7F5EE", borderRadius: 8, padding: "10px 12px", fontSize: 14, fontWeight: 600 },
+  sideBtnWin: { background: "#0F5257", color: "#fff", border: "1px solid #0F5257" },
+  groupSubLabel: { fontSize: 10.5, fontWeight: 500, opacity: 0.75, marginTop: 2 },
+  trophyMark: { fontSize: 12 },
+  scoreInputInline: { width: 52, flexShrink: 0, border: "1px solid #E4E0D2", borderRadius: 8, padding: "6px 4px", fontSize: 14, textAlign: "center" },
+  scoreDisplayInline: { width: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: "#0F5257", fontFamily: "'JetBrains Mono', monospace" },
+  winnerNote: { fontSize: 11, color: "#6C7A76", marginTop: 6 },
+  championCard: { background: "#16211F", color: "#C4D93B", fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 700, textAlign: "center", padding: 16, borderRadius: 12, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 8 },
+  standingsList: { display: "flex", flexDirection: "column", gap: 8 },
+  standCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, overflow: "hidden" },
+  standRowStatic: { width: "100%", display: "grid", gridTemplateColumns: "24px 1fr 70px 90px", alignItems: "center", padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
+  rankNum: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#6C7A76", fontWeight: 700 },
+  standName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
+  recordText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#0F5257", fontWeight: 700, textAlign: "center" },
+  diffText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#6C7A76", fontWeight: 600, textAlign: "right" },
+  toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "#16211F", color: "#fff", padding: "10px 18px", borderRadius: 20, fontSize: 13, fontWeight: 600, zIndex: 999 },
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<GroupTournamentApp />);
+</script>
+</body>
+</html>
