@@ -66,8 +66,25 @@ block.
    scores here as matches finish — the winning Group is derived from the score
    automatically, same as the doubles-bracket app.
 5. **Standings tab**: live-updating Group point totals and a champion banner once
-   every match has a result.
-6. Everyone else just opens the link — read-only, live-updating, no sign-in needed.
+   every match has a result. If two Groups are tied on points, the tiebreaker is
+   total point differential — shown next to the points, e.g. "4 pts (+7)" — same
+   idea as net rating/goal difference. A Group that's still tied on points *and*
+   differential after everything's played shows up as a genuine co-champion.
+6. **Fun Stats tab**: a personal record for every player — wins/losses/ties and
+   point differential — built automatically from the same scores you're already
+   entering, nothing extra to type. Doubles partners share a result, and a
+   captain's Mixed-team result and Singles result both count toward their own
+   line. Also calls out the tournament's best record, most wins, most matches
+   played ("iron player"), most losses ("wooden spoon"), biggest blowout, and
+   closest match — good bar-talk material once the tournament wraps.
+7. **Export PDF** (top of the Standings and Fun Stats tabs): downloads a
+   point-in-time record — final standings, every Group's roster, the full match
+   log round by round, and the Fun Stats leaderboard — as a PDF. Worth doing
+   once the tournament is done and before you reshuffle for the next one, since
+   reshuffling resets the schedule and every recorded score with no way to get
+   them back. (Reshuffle now double-checks with you first if it would erase any
+   scores you've already entered, but the PDF is the actual permanent copy.)
+8. Everyone else just opens the link — read-only, live-updating, no sign-in needed.
    The **"Find your match"** bar works the same way as the other event pages.
 
 ## Verification note

@@ -24,6 +24,11 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+
+<!-- jsPDF — used only for the "Export tournament PDF" button (a client-side
+     record of the standings/groups/schedule/fun-stats before a reshuffle
+     wipes the live data) -->
+<script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -156,6 +161,17 @@ function teamLabelFromIds(t, byId) {
 // shuffle time) so it stays correct if admin reassigns the captain later.
 function groupLabelWithCaptain(g, byId) {
   return `${g.label} — ${playerName(g.captainId, byId)}`;
+}
+
+// ---- small helpers shared by the Fun Stats tab and the PDF export ----
+function sideLabel(team, byId) {
+  return team.category === "Singles" ? playerName(team.p1Id, byId) : teamLabelFromIds(team, byId);
+}
+function winnerSide(h) { return h.r.winnerGroupId === h.m.groupA.id ? h.m.teamA : h.m.teamB; }
+function loserSide(h) { return h.r.winnerGroupId === h.m.groupA.id ? h.m.teamB : h.m.teamA; }
+function scoreLine(h) {
+  const hi = Math.max(h.r.scoreA, h.r.scoreB), lo = Math.min(h.r.scoreA, h.r.scoreB);
+  return `${hi}-${lo}`;
 }
 
 // Builds every cross-group match (round-robin per category key across groups that
@@ -413,6 +429,11 @@ function GroupTournamentApp() {
   // ---- shuffle / rebuild groups ----
   const shuffleGroups = () => {
     if (rosterCounts.Expert < 1) { showToast("Add at least 1 Expert to captain a group first"); return; }
+    const hasRecordedScores = Object.values(matchScores).some((s) => s && typeof s === "object" && (s.a !== null || s.b !== null));
+    if (groups.length > 0 && hasRecordedScores) {
+      const ok = window.confirm("Reshuffling erases the current groups, schedule, and every recorded score — there's no undo. Export a PDF first (Standings tab) if you want to keep a record of this tournament. Reshuffle anyway?");
+      if (!ok) return;
+    }
     const next = autoAssignGroups(roster);
     setGroups(next);
     setMatchScores({}); setCourtOverrides({});
@@ -453,28 +474,147 @@ function GroupTournamentApp() {
     return { status: "done", winnerGroupId: s.a > s.b ? m.groupA.id : m.groupB.id, scoreA: s.a, scoreB: s.b };
   };
 
+  // Point differential (sum of "own score minus opponent score" across every
+  // match a group has played) is the tiebreaker when two groups are level on
+  // points — same idea as net rating/goal difference in other sports. It's
+  // the secondary sort key below, and it's what decides a champion when the
+  // top of the table is tied on points.
   const standings = useMemo(() => {
-    const points = {}; const played = {};
-    groups.forEach((g) => { points[g.id] = 0; played[g.id] = 0; });
+    const points = {}; const played = {}; const diff = {};
+    groups.forEach((g) => { points[g.id] = 0; played[g.id] = 0; diff[g.id] = 0; });
     matches.forEach((m) => {
       const r = matchResult(m);
       if (r.status === "pending") return;
       played[m.groupA.id] = (played[m.groupA.id] || 0) + 1;
       played[m.groupB.id] = (played[m.groupB.id] || 0) + 1;
+      diff[m.groupA.id] = (diff[m.groupA.id] || 0) + (r.scoreA - r.scoreB);
+      diff[m.groupB.id] = (diff[m.groupB.id] || 0) + (r.scoreB - r.scoreA);
       if (r.status === "done") points[r.winnerGroupId] = (points[r.winnerGroupId] || 0) + 1;
     });
-    const rows = groups.map((g) => ({ group: g, points: points[g.id] || 0, played: played[g.id] || 0, total: matches.filter((m) => m.groupA.id === g.id || m.groupB.id === g.id).length }));
-    return rows.sort((a, b) => b.points - a.points);
+    const rows = groups.map((g) => ({ group: g, points: points[g.id] || 0, played: played[g.id] || 0, diff: diff[g.id] || 0, total: matches.filter((m) => m.groupA.id === g.id || m.groupB.id === g.id).length }));
+    return rows.sort((a, b) => b.points - a.points || b.diff - a.diff);
   }, [groups, matches, matchScores]);
 
   const champion = useMemo(() => {
     if (standings.length === 0) return null;
     const allDone = matches.every((m) => matchResult(m).status !== "pending");
     if (!allDone || matches.length === 0) return null;
-    const top = standings[0].points;
-    const leaders = standings.filter((s) => s.points === top);
+    const top = standings[0];
+    const leaders = standings.filter((s) => s.points === top.points && s.diff === top.diff);
     return leaders.length === 1 ? leaders[0].group : { tie: leaders.map((l) => l.group) };
   }, [standings, matches, matchScores]);
+
+  // ---- personal "fun stats" (bar-talk material) ----
+  // A doubles pairing is fixed for the whole tournament, so a player's
+  // personal record is just every match their team(s) played — a captain
+  // gets two streams merged: their Mixed-team results AND their personal
+  // Singles results, exactly like a real person would recount their day.
+  const playerStats = useMemo(() => {
+    const stats = {};
+    const ensure = (pid) => (stats[pid] = stats[pid] || { wins: 0, losses: 0, ties: 0, played: 0, pf: 0, pa: 0 });
+    const credit = (pid, own, opp, status, won) => {
+      const s = ensure(pid);
+      s.played++; s.pf += own; s.pa += opp;
+      if (status === "tie") s.ties++; else if (won) s.wins++; else s.losses++;
+    };
+    matches.forEach((m) => {
+      const r = matchResult(m);
+      if (r.status === "pending") return;
+      [m.teamA.p1Id, m.teamA.p2Id].filter(Boolean).forEach((pid) => credit(pid, r.scoreA, r.scoreB, r.status, r.status === "done" && r.winnerGroupId === m.groupA.id));
+      [m.teamB.p1Id, m.teamB.p2Id].filter(Boolean).forEach((pid) => credit(pid, r.scoreB, r.scoreA, r.status, r.status === "done" && r.winnerGroupId === m.groupB.id));
+    });
+    return roster.map((p) => {
+      const s = stats[p.id] || { wins: 0, losses: 0, ties: 0, played: 0, pf: 0, pa: 0 };
+      return { player: p, ...s, diff: s.pf - s.pa, winPct: s.played > 0 ? s.wins / s.played : 0 };
+    });
+  }, [matches, matchScores, roster]);
+
+  const matchHighlights = useMemo(() => {
+    const decided = matches.map((m) => ({ m, r: matchResult(m) })).filter(({ r }) => r.status === "done");
+    if (decided.length === 0) return null;
+    const withMargin = decided.map((h) => ({ ...h, margin: Math.abs(h.r.scoreA - h.r.scoreB) }));
+    const blowout = withMargin.reduce((a, b) => (b.margin > a.margin ? b : a));
+    const nailbiter = withMargin.reduce((a, b) => (b.margin < a.margin ? b : a));
+    return { blowout, nailbiter };
+  }, [matches, matchScores]);
+
+  // ---- export a point-in-time PDF record (standings/groups/full match log/fun
+  // stats) — mainly so a reshuffle (which wipes scores) doesn't erase the only
+  // record of how a tournament actually went. ----
+  const exportPdf = () => {
+    if (!window.jspdf || !window.jspdf.jsPDF) { showToast("PDF library still loading — try again in a moment"); return; }
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const marginX = 40;
+    const pageH = doc.internal.pageSize.getHeight();
+    const pageW = doc.internal.pageSize.getWidth();
+    let y = 50;
+    const ensureRoom = (needed) => { if (y + needed > pageH - 40) { doc.addPage(); y = 50; } };
+    const heading = (text, size = 14) => { ensureRoom(size + 14); doc.setFont(undefined, "bold"); doc.setFontSize(size); doc.text(text, marginX, y); y += size + 8; doc.setFont(undefined, "normal"); };
+    const line = (text, size = 10) => { ensureRoom(size + 6); doc.setFontSize(size); doc.text(text, marginX, y); y += size + 4; };
+    const rule = () => { ensureRoom(10); doc.setDrawColor(200); doc.line(marginX, y, pageW - marginX, y); y += 12; };
+
+    doc.setFontSize(18); doc.setFont(undefined, "bold");
+    doc.text(eventName || "RHI-PSCC Group Tournament", marginX, y); y += 22;
+    doc.setFont(undefined, "normal"); doc.setFontSize(10);
+    doc.text(`Exported ${new Date().toLocaleString()}`, marginX, y); y += 20;
+    rule();
+
+    heading("Final standings");
+    standings.forEach((row, i) => {
+      const diffStr = row.diff > 0 ? `+${row.diff}` : `${row.diff}`;
+      line(`${i + 1}. ${groupLabelWithCaptain(row.group, byId)} — ${row.points} pt${row.points === 1 ? "" : "s"} (${diffStr}) — ${row.played}/${row.total} played`);
+    });
+    if (champion) {
+      y += 4;
+      line(champion.tie ? `Tied for first: ${champion.tie.map((g) => groupLabelWithCaptain(g, byId)).join(" & ")}` : `Champion: ${groupLabelWithCaptain(champion, byId)}`, 11);
+    }
+    y += 10; rule();
+
+    heading("Groups & teams");
+    groups.forEach((g) => {
+      line(groupLabelWithCaptain(g, byId), 12);
+      g.teams.forEach((t) => {
+        const desc = t.key === "Mixed" ? `${playerName(t.p1Id, byId)} (captain) & ${playerName(t.p2Id, byId)}` : teamLabelFromIds(t, byId);
+        line(`   ${t.label}: ${desc}`);
+      });
+      y += 4;
+    });
+    rule();
+
+    heading("Full match log");
+    roundsWithCourts.forEach((r) => {
+      line(`Round ${r.roundNum}`, 12);
+      r.matches.forEach((m) => {
+        const res = matchResult(m);
+        const scoreStr = res.status === "done" ? `${res.scoreA}-${res.scoreB}` : res.status === "tie" ? `${res.scoreA}-${res.scoreB} (tie)` : "pending";
+        line(`   Court ${m.court} · ${m.category} · ${sideLabel(m.teamA, byId)} (${m.groupA.label}) vs ${sideLabel(m.teamB, byId)} (${m.groupB.label}) — ${scoreStr}`);
+      });
+      y += 4;
+    });
+    rule();
+
+    heading("Fun stats");
+    const withGames = playerStats.filter((p) => p.played > 0);
+    if (withGames.length === 0) {
+      line("No results recorded yet.");
+    } else {
+      const sorted = [...withGames].sort((a, b) => b.winPct - a.winPct || b.wins - a.wins || b.played - a.played);
+      sorted.forEach((p) => {
+        const diffStr = p.diff > 0 ? `+${p.diff}` : `${p.diff}`;
+        line(`${p.player.name} (${p.player.rank}) — ${p.wins}-${p.losses}${p.ties ? `-${p.ties}` : ""} — ${diffStr}`);
+      });
+      if (matchHighlights) {
+        y += 6;
+        line(`Biggest blowout: ${sideLabel(winnerSide(matchHighlights.blowout), byId)} beat ${sideLabel(loserSide(matchHighlights.blowout), byId)} ${scoreLine(matchHighlights.blowout)} (${matchHighlights.blowout.m.category})`);
+        line(`Nail-biter: ${sideLabel(winnerSide(matchHighlights.nailbiter), byId)} edged ${sideLabel(loserSide(matchHighlights.nailbiter), byId)} ${scoreLine(matchHighlights.nailbiter)} (${matchHighlights.nailbiter.m.category})`);
+      }
+    }
+
+    const fname = `${(eventName || "tournament").replace(/[^a-z0-9]+/gi, "_")}.pdf`;
+    doc.save(fname);
+    showToast("PDF downloaded");
+  };
 
   // ---- scoring ----
   const setScoreSide = (matchId, side, rawValue) => {
@@ -593,6 +733,7 @@ function GroupTournamentApp() {
           { key: "groups", label: `Groups (${groups.length})` },
           { key: "schedule", label: "Schedule" },
           { key: "standings", label: "Standings" },
+          { key: "funstats", label: "Fun Stats" },
         ].map((t) => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{ ...styles.tabBtn, ...(tab === t.key ? styles.tabBtnActive : {}) }}>{t.label}</button>
         ))}
@@ -629,7 +770,11 @@ function GroupTournamentApp() {
         )}
 
         {tab === "standings" && (
-          <StandingsTab standings={standings} matches={matches} matchResult={matchResult} byId={byId} champion={champion} />
+          <StandingsTab standings={standings} matches={matches} matchResult={matchResult} byId={byId} champion={champion} exportPdf={exportPdf} />
+        )}
+
+        {tab === "funstats" && (
+          <FunStatsTab playerStats={playerStats} matchHighlights={matchHighlights} byId={byId} exportPdf={exportPdf} />
         )}
       </main>
 
@@ -888,13 +1033,16 @@ function ScheduleTab({ groups, matches, roundsWithCourts, byId, isAdmin, courtCo
 
 // ============================ Standings tab ============================
 
-function StandingsTab({ standings, matches, matchResult, byId, champion }) {
+function StandingsTab({ standings, matches, matchResult, byId, champion, exportPdf }) {
   return (
     <section>
-      <h2 style={styles.h2}>Standings</h2>
+      <div style={styles.sectionHead}>
+        <h2 style={styles.h2}>Standings</h2>
+        {standings.length > 0 && <button style={styles.linkBtn} onClick={exportPdf}>📄 Export PDF</button>}
+      </div>
       {standings.length === 0 ? <p style={styles.muted}>Shuffle groups first.</p> : (
         <>
-          <p style={styles.mutedSmall}>1 point per match win across every category, all weighted equally. A tied score counts as played but awards no point to either side — replay it.</p>
+          <p style={styles.mutedSmall}>1 point per match win across every category, all weighted equally. A tied score counts as played but awards no point to either side — replay it. Ties in points are broken by total point differential (shown in parentheses, like a net rating) — the group that outscored its opponents by more comes out ahead.</p>
           <div style={styles.standingsList}>
             {standings.map((row, i) => (
               <div key={row.group.id} style={styles.standCard}>
@@ -902,6 +1050,7 @@ function StandingsTab({ standings, matches, matchResult, byId, champion }) {
                   <span style={styles.rankNum}>{i + 1}</span>
                   <span style={styles.standName}>{groupLabelWithCaptain(row.group, byId)}</span>
                   <span style={styles.recordText}>{row.points} pt{row.points === 1 ? "" : "s"}</span>
+                  <span style={{ ...styles.diffScoreText, color: row.diff > 0 ? "#0F5257" : row.diff < 0 ? "#B4483A" : "#6C7A76" }}>{row.diff > 0 ? `+${row.diff}` : row.diff}</span>
                   <span style={styles.diffText}>{row.played}/{row.total} played</span>
                 </div>
               </div>
@@ -916,6 +1065,102 @@ function StandingsTab({ standings, matches, matchResult, byId, champion }) {
         </>
       )}
     </section>
+  );
+}
+
+// ============================ Fun Stats tab ============================
+// Personal bar-talk stats — best record, most wins, iron player, wooden
+// spoon, plus the tournament's biggest blowout and closest match. All
+// derived from the same matches/scores everyone already sees; nothing new
+// to enter.
+
+function FunStatsTab({ playerStats, matchHighlights, byId, exportPdf }) {
+  const withGames = playerStats.filter((p) => p.played > 0);
+
+  return (
+    <section>
+      <div style={styles.sectionHead}>
+        <h2 style={styles.h2}>Fun Stats</h2>
+        {withGames.length > 0 && <button style={styles.linkBtn} onClick={exportPdf}>📄 Export PDF</button>}
+      </div>
+      {withGames.length === 0 ? (
+        <p style={styles.muted}>Stats show up here once a few matches have scores — check back once the schedule gets going.</p>
+      ) : (
+        <FunStatsBody withGames={withGames} matchHighlights={matchHighlights} byId={byId} />
+      )}
+    </section>
+  );
+}
+
+function FunStatsBody({ withGames, matchHighlights, byId }) {
+  const eligible = withGames.filter((p) => p.played >= 2);
+  const pool = eligible.length > 0 ? eligible : withGames;
+  const bestRecord = [...pool].sort((a, b) => b.winPct - a.winPct || b.wins - a.wins)[0];
+  const mostWins = [...withGames].sort((a, b) => b.wins - a.wins)[0];
+  const ironPlayer = [...withGames].sort((a, b) => b.played - a.played)[0];
+  const woodenSpoon = [...withGames].sort((a, b) => b.losses - a.losses)[0];
+  const undefeated = withGames.filter((p) => p.wins > 0 && p.losses === 0 && p.ties === 0);
+  const sorted = [...withGames].sort((a, b) => b.winPct - a.winPct || b.wins - a.wins || b.played - a.played);
+
+  return (
+    <>
+      <p style={styles.mutedSmall}>Every player's personal record across all their matches — doubles partners share a result, so a team win counts for both players (a captain's Mixed-team result and Singles result both count toward their own line). Just for fun, not part of the standings.</p>
+
+      <div style={styles.statGrid}>
+        <div style={styles.statCard}>
+          <div style={styles.statLabel}>🏆 Best record</div>
+          <div style={styles.statValue}>{bestRecord.player.name}</div>
+          <div style={styles.statSub}>{bestRecord.wins}-{bestRecord.losses}{bestRecord.ties ? `-${bestRecord.ties}` : ""} ({Math.round(bestRecord.winPct * 100)}%)</div>
+        </div>
+        <div style={styles.statCard}>
+          <div style={styles.statLabel}>🔥 Most wins</div>
+          <div style={styles.statValue}>{mostWins.player.name}</div>
+          <div style={styles.statSub}>{mostWins.wins} win{mostWins.wins === 1 ? "" : "s"}</div>
+        </div>
+        <div style={styles.statCard}>
+          <div style={styles.statLabel}>💪 Iron player</div>
+          <div style={styles.statValue}>{ironPlayer.player.name}</div>
+          <div style={styles.statSub}>{ironPlayer.played} match{ironPlayer.played === 1 ? "" : "es"} played</div>
+        </div>
+        <div style={styles.statCard}>
+          <div style={styles.statLabel}>🥄 Wooden spoon</div>
+          <div style={styles.statValue}>{woodenSpoon.player.name}</div>
+          <div style={styles.statSub}>{woodenSpoon.losses} loss{woodenSpoon.losses === 1 ? "" : "es"}</div>
+        </div>
+      </div>
+
+      {undefeated.length > 0 && (
+        <p style={styles.mutedSmall}>🎯 Still undefeated: {undefeated.map((p) => p.player.name).join(", ")}</p>
+      )}
+
+      {matchHighlights && (
+        <div style={styles.statGrid}>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>💥 Biggest blowout</div>
+            <div style={styles.statValue}>{sideLabel(winnerSide(matchHighlights.blowout), byId)}</div>
+            <div style={styles.statSub}>beat {sideLabel(loserSide(matchHighlights.blowout), byId)} {scoreLine(matchHighlights.blowout)} · {matchHighlights.blowout.m.category}</div>
+          </div>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>😅 Nail-biter</div>
+            <div style={styles.statValue}>{sideLabel(winnerSide(matchHighlights.nailbiter), byId)}</div>
+            <div style={styles.statSub}>edged {sideLabel(loserSide(matchHighlights.nailbiter), byId)} {scoreLine(matchHighlights.nailbiter)} · {matchHighlights.nailbiter.m.category}</div>
+          </div>
+        </div>
+      )}
+
+      <div style={styles.standingsList}>
+        {sorted.map((p) => (
+          <div key={p.player.id} style={styles.standCard}>
+            <div style={styles.statRow}>
+              <span style={styles.standName}>{p.player.name}</span>
+              <span style={styles.statRankTag}>{p.player.rank}</span>
+              <span style={styles.recordText}>{p.wins}-{p.losses}{p.ties ? `-${p.ties}` : ""}</span>
+              <span style={{ ...styles.diffScoreText, color: p.diff > 0 ? "#0F5257" : p.diff < 0 ? "#B4483A" : "#6C7A76" }}>{p.diff > 0 ? `+${p.diff}` : p.diff}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -1002,11 +1247,19 @@ const styles = {
   championCard: { background: "#16211F", color: "#C4D93B", fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 700, textAlign: "center", padding: 16, borderRadius: 12, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 8 },
   standingsList: { display: "flex", flexDirection: "column", gap: 8 },
   standCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, overflow: "hidden" },
-  standRowStatic: { width: "100%", display: "grid", gridTemplateColumns: "24px 1fr 70px 90px", alignItems: "center", padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
+  standRowStatic: { width: "100%", display: "grid", gridTemplateColumns: "24px 1fr 60px 55px 90px", alignItems: "center", padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
   rankNum: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#6C7A76", fontWeight: 700 },
   standName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
   recordText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#0F5257", fontWeight: 700, textAlign: "center" },
   diffText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#6C7A76", fontWeight: 600, textAlign: "right" },
+  diffScoreText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, fontWeight: 700, textAlign: "center" },
+  statGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 16 },
+  statCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 12 },
+  statLabel: { fontSize: 11, fontWeight: 700, color: "#6C7A76", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 },
+  statValue: { fontFamily: "'Oswald', sans-serif", fontSize: 16, fontWeight: 700, color: "#16211F" },
+  statSub: { fontSize: 12, color: "#6C7A76", marginTop: 2 },
+  statRow: { width: "100%", display: "grid", gridTemplateColumns: "1fr 90px 60px 55px", alignItems: "center", padding: "10px 12px", fontSize: 13.5, fontWeight: 600, gap: 8 },
+  statRankTag: { fontSize: 11, color: "#6C7A76", textAlign: "right" },
   toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "#16211F", color: "#fff", padding: "10px 18px", borderRadius: 20, fontSize: 13, fontWeight: 600, zIndex: 999 },
 };
 
