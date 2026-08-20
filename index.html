@@ -622,19 +622,22 @@ function GroupTournamentApp() {
     doc.rect(0, 0, pageW, 112, "F");
     doc.setFillColor(...C.lime);
     doc.rect(0, 108, pageW, 4, "F");
+    // logo lockup, top-left of the header band, on its own dark chip like the
+    // site header — title/eyebrow text starts to the right of it.
+    const logoW = 130, logoH = 31, logoChipW = logoW + 14;
+    let textX = marginX;
     try {
-      // logo lockup, top-right of the header band, on its own dark chip like the site header
-      const logoW = 130, logoH = 31;
       doc.setFillColor(...C.tealDark);
-      doc.roundedRect(pageW - marginX - logoW - 14, 20, logoW + 14, logoH + 14, 5, 5, "F");
-      doc.addImage(LOGO_SRC, "PNG", pageW - marginX - logoW - 7, 27, logoW, logoH);
+      doc.roundedRect(marginX, 20, logoChipW, logoH + 14, 5, 5, "F");
+      doc.addImage(LOGO_SRC, "PNG", marginX + 7, 27, logoW, logoH);
+      textX = marginX + logoChipW + 14;
     } catch (e) { /* logo is decorative — never block the export over it */ }
     doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(...C.lime);
-    doc.text("RHI-PSCC · TOURNAMENT RECORD", marginX, 34);
+    doc.text("RHI-PSCC · TOURNAMENT RECORD", textX, 34);
     doc.setFont("helvetica", "bold"); doc.setFontSize(21); doc.setTextColor(...C.white);
-    doc.text(eventName || "RHI-PSCC Group Tournament", marginX, 65, { maxWidth: contentW - 160 });
+    doc.text(eventName || "RHI-PSCC Group Tournament", textX, 65, { maxWidth: pageW - marginX - textX });
     doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(226, 230, 222);
-    doc.text(`Exported ${new Date().toLocaleString()}`, marginX, 88);
+    doc.text(`Exported ${new Date().toLocaleString()}`, textX, 88);
     y = 142;
 
     // ---- final standings ----
@@ -842,26 +845,26 @@ function GroupTournamentApp() {
       <header style={styles.header}>
         <div style={styles.headerLine} />
         <div style={styles.headerRow}>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={styles.eyebrow}>{syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}</div>
-            {isAdmin ? (
-              <input value={eventName} onChange={(e) => setEventName(e.target.value)} onBlur={() => patch({ eventName })} style={styles.eventNameInput} />
-            ) : (
-              <h1 style={styles.h1}>{eventName}</h1>
-            )}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
             <div style={styles.logoBadge}>
               <img src={LOGO_SRC} alt="Robert Half · ATI" style={styles.logoImg} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-              <div style={styles.courtBadge}>{courtCount} COURTS · {groups.length} GROUPS</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={styles.eyebrow}>{syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}</div>
               {isAdmin ? (
-                <button style={styles.adminPillOn} onClick={lockAdmin}>Admin ✓ (tap to lock)</button>
+                <input value={eventName} onChange={(e) => setEventName(e.target.value)} onBlur={() => patch({ eventName })} style={styles.eventNameInput} />
               ) : (
-                <button style={styles.adminPillOff} onClick={() => setPinOpen(!pinOpen)}>Admin sign-in</button>
+                <h1 style={styles.h1}>{eventName}</h1>
               )}
             </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+            <div style={styles.courtBadge}>{courtCount} COURTS · {groups.length} GROUPS</div>
+            {isAdmin ? (
+              <button style={styles.adminPillOn} onClick={lockAdmin}>Admin ✓ (tap to lock)</button>
+            ) : (
+              <button style={styles.adminPillOff} onClick={() => setPinOpen(!pinOpen)}>Admin sign-in</button>
+              )}
           </div>
         </div>
         {pinOpen && !isAdmin && (
